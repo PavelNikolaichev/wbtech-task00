@@ -1,79 +1,21 @@
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
     routing::get,
     Json, Router,
-    response::IntoResponse, http::StatusCode
 };
-use serde::{Deserialize, Serialize};
-use std::{sync::Arc};
-use tokio_postgres::{NoTls, Client};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tokio_postgres::{Client, NoTls};
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
-use postgres_types::FromSql;
 use validator::Validate;
-use tokio::sync::RwLock;
-use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Validate, FromSql)]
-struct Delivery {
-    #[validate(length(min = 1))]
-    name: String,
-    // #[validate(phone)]
-    phone: String,
-    zip: String,
-    city: String,
-    address: String,
-    region: String,
-    #[validate(email)]
-    email: String,
-}
+#[path="models/models.rs"] mod models;
+use crate::models::{Order, PutOrder};
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromSql)]
-struct Payment {
-    transaction: String,
-    request_id: String,
-    currency: String,
-    provider: String,
-    amount: u32,
-    payment_dt: u32,
-    bank: String,
-    delivery_cost: u32,
-    goods_total: u32,
-    custom_fee: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromSql)]
-struct Item {
-    chrt_id: u32,
-    track_number: String,
-    price: u32,
-    rid: String,
-    name: String,
-    sale: u32,
-    size: String,
-    total_price: u32,
-    nm_id: u32,
-    brand: String,
-    status: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Validate, FromSql)]
-struct Order {
-    order_uid: String,
-    track_number: String,
-    entry: String,
-    delivery: Delivery,
-    payment: Payment,
-    items: Vec<Item>,
-    locale: String,
-    internal_signature: String,
-    customer_id: String,
-    delivery_service: String,
-    shared_key: String,
-    sm_id: u32,
-    date_created: String,
-    oof_shard: String,
-}
 
 struct AppState {
     db_client: Client,
@@ -87,10 +29,13 @@ async fn main() {
         .finish();
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    let (client, connection) = tokio_postgres::connect("host=localhost user=postgres password=postgres dbname=postgres \
-    ", NoTls)
-        .await
-        .expect("Failed to connect to Postgres");
+    let (client, connection) = tokio_postgres::connect(
+        "host=localhost user=postgres password=postgres dbname=postgres \
+    ",
+        NoTls,
+    )
+    .await
+    .expect("Failed to connect to Postgres");
     tokio::spawn(async move {
         if let Err(e) = connection.await {
             error!("Postgres connection error: {}", e);
@@ -119,10 +64,14 @@ async fn main() {
         .route("/orders/:id", get(get_order_by_id).put(update_order))
         .with_state(app_state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+        .await
+        .unwrap();
     info!("Listening on: {}", listener.local_addr().unwrap());
 
-    axum::serve(listener, app.into_make_service()).await.unwrap();
+    axum::serve(listener, app.into_make_service())
+        .await
+        .unwrap();
 }
 
 async fn get_orders(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -132,7 +81,11 @@ async fn get_orders(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         Ok(rows) => rows,
         Err(e) => {
             error!("Error querying orders: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to retrieve orders").into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to retrieve orders",
+            )
+                .into_response();
         }
     };
 
@@ -153,7 +106,7 @@ async fn get_orders(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 async fn get_order_by_id(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     info!("Getting order by ID: {}", id);
 
@@ -162,7 +115,11 @@ async fn get_order_by_id(
         return (StatusCode::OK, Json(order.clone())).into_response();
     }
 
-    match state.db_client.query_one("SELECT data FROM orders WHERE order_uid = $1", &[&id]).await {
+    match state
+        .db_client
+        .query_one("SELECT data FROM orders WHERE order_uid = $1", &[&id])
+        .await
+    {
         Ok(row) => {
             let order: Order = row.get("data");
             let mut cache = state.cache.write().await;
@@ -176,9 +133,10 @@ async fn get_order_by_id(
     }
 }
 
-
-
-async fn create_order(State(state): State<Arc<AppState>>, Json(order): Json<Order>) -> Result<Json<Order>, String> {
+async fn create_order(
+    State(state): State<Arc<AppState>>,
+    Json(order): Json<Order>,
+) -> Result<Json<Order>, String> {
     info!("Creating new order with UID: {}", order.order_uid);
 
     if let Err(validation_errors) = order.validate() {
@@ -188,7 +146,11 @@ async fn create_order(State(state): State<Arc<AppState>>, Json(order): Json<Orde
 
     let query = "INSERT INTO orders (order_uid, data) VALUES ($1, $2::jsonb)";
     let order_json: serde_json::Value = serde_json::to_value(&order).unwrap();
-    if let Err(e) = state.db_client.execute(query, &[&order.order_uid, &order_json]).await {
+    if let Err(e) = state
+        .db_client
+        .execute(query, &[&order.order_uid, &order_json])
+        .await
+    {
         error!("Error inserting order: {}", e);
         return Err("Failed to create order".to_string());
     }
@@ -202,23 +164,76 @@ async fn create_order(State(state): State<Arc<AppState>>, Json(order): Json<Orde
 async fn update_order(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(order): Json<Order>
+    Json(partial_order): Json<PutOrder>,
 ) -> Result<Json<Order>, String> {
     info!("Updating order with UID: {}", id);
 
-    if let Err(validation_errors) = order.validate() {
-        error!("Validation error: {:?}", validation_errors);
-        return Err("Invalid data".to_string());
+    let mut cache = state.cache.write().await;
+
+    let mut order = if let Some(cached_order) = cache.get(&id) {
+        cached_order.clone()
+    } else {
+        match state
+            .db_client
+            .query_one("SELECT data FROM orders WHERE order_uid = $1", &[&id])
+            .await
+        {
+            Ok(row) => {
+                let order_json: serde_json::Value = row.get("data");
+                serde_json::from_value::<Order>(order_json).unwrap()
+            }
+            Err(_) => return Err("Order not found".to_string()),
+        }
+    };
+
+    // Well, sorry for this bunch of code, I know it's bad and I know that my DB schema is the worst - basically useless.
+    if let Some(track_number) = partial_order.track_number {
+        order.track_number = track_number;
+    }
+    if let Some(entry) = partial_order.entry {
+        order.entry = entry;
+    }
+    if let Some(delivery) = partial_order.delivery {
+        order.delivery = delivery;
+    }
+    if let Some(payment) = partial_order.payment {
+        order.payment = payment;
+    }
+    if let Some(items) = partial_order.items {
+        order.items = items;
+    }
+    if let Some(locale) = partial_order.locale {
+        order.locale = locale;
+    }
+    if let Some(internal_signature) = partial_order.internal_signature {
+        order.internal_signature = internal_signature;
+    }
+    if let Some(customer_id) = partial_order.customer_id {
+        order.customer_id = customer_id;
+    }
+    if let Some(delivery_service) = partial_order.delivery_service {
+        order.delivery_service = delivery_service;
+    }
+    if let Some(shared_key) = partial_order.shared_key {
+        order.shared_key = shared_key;
+    }
+    if let Some(sm_id) = partial_order.sm_id {
+        order.sm_id = sm_id;
+    }
+    if let Some(date_created) = partial_order.date_created {
+        order.date_created = date_created;
+    }
+    if let Some(oof_shard) = partial_order.oof_shard {
+        order.oof_shard = oof_shard;
     }
 
     let query = "UPDATE orders SET data = $1::jsonb WHERE order_uid = $2";
-    let order_json = serde_json::to_string(&order).unwrap();
+    let order_json = serde_json::to_value(&order).unwrap();
     if let Err(e) = state.db_client.execute(query, &[&order_json, &id]).await {
         error!("Error updating order: {}", e);
         return Err("Failed to update order".to_string());
     }
 
-    let mut cache = state.cache.write().await;
     cache.insert(id.clone(), order.clone());
 
     Ok(Json(order))
